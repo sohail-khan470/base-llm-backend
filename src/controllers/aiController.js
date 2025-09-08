@@ -13,7 +13,7 @@ const chatWithAIStream = async (req, res) => {
     await streamAIResponse(prompt, sendToken); // Await until Ollama stream completes
     res.end(); // End the stream cleanly
   } catch (err) {
-    console.error(err);
+    console.log(err);
     res.end(); // End on error
   }
 };

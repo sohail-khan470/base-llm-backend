@@ -1,25 +1,27 @@
 const axios = require("axios");
 
-const DEFAULT_MODEL = "deepseek-coder:1.3b";
+const DEFAULT_MODEL = "phi3:latest";
 const MAX_TOKENS = 2000;
 
 const streamAIResponse = (prompt, onData, onDone = () => {}) => {
   return new Promise((resolve, reject) => {
+    // Use the correct endpoint - /api/generate is the standard one
     axios
       .post(
-        "http://localhost:11434/api/generate",
+        "http://localhost:11434/api/generate", // Changed to correct endpoint
         {
           model: DEFAULT_MODEL,
-          prompt,
-          stream: true, // Explicitly enable streaming (default is true, but good to set)
+          prompt: prompt, // Changed from messages to prompt
+          stream: true,
           options: {
-            num_predict: MAX_TOKENS, // Correct way to limit tokens
+            num_predict: MAX_TOKENS,
           },
         },
         { responseType: "stream" }
       )
       .then((responseStream) => {
         let isDone = false;
+        let fullResponse = "";
 
         responseStream.data.on("data", (chunk) => {
           const lines = chunk.toString().split("\n").filter(Boolean);
@@ -27,13 +29,17 @@ const streamAIResponse = (prompt, onData, onDone = () => {}) => {
           for (const line of lines) {
             try {
               const data = JSON.parse(line);
+
+              // Different response format for /api/generate
               if (data.response) {
-                onData(data.response); // Send chunk to callback
+                onData(data.response);
+                fullResponse += data.response;
               }
+
               if (data.done) {
                 isDone = true;
-                onDone(); // Optional custom done callback
-                resolve();
+                onDone(fullResponse);
+                resolve(fullResponse);
               }
             } catch (err) {
               console.error("Parse error:", err.message);
@@ -43,21 +49,28 @@ const streamAIResponse = (prompt, onData, onDone = () => {}) => {
 
         responseStream.data.on("end", () => {
           if (!isDone) {
-            console.warn("Stream ended without 'done: true' signal");
+            console.warn("Stream ended without 'done: true'");
           }
-          onDone(); // Optional
-          resolve();
+          onDone(fullResponse);
+          resolve(fullResponse);
         });
 
         responseStream.data.on("error", (err) => {
           console.error("Stream error:", err.message);
-          onDone(); // Optional
+          onDone(fullResponse);
           reject(err);
         });
       })
       .catch((err) => {
         console.error("❌ AI Service Error:", err.message);
-        onDone(); // Optional
+
+        // Provide more detailed error information
+        if (err.response) {
+          console.error("Status:", err.response.status);
+          console.error("Response data:", err.response.data);
+        }
+
+        onDone();
         reject(err);
       });
   });
