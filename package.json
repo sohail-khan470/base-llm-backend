@@ -1,12 +1,17 @@
 {
   "dependencies": {
+    "@chroma-core/default-embed": "^0.1.8",
     "axios": "^1.11.0",
+    "chromadb": "^3.0.14",
     "cors": "^2.8.5",
-    "dotenv": "^17.2.1",
+    "dotenv": "^17.2.2",
     "express": "^5.1.0",
+    "express-fileupload": "^1.5.2",
     "got": "^14.4.7",
+    "mammoth": "^1.10.0",
     "nodemon": "^3.1.10",
-    "ollama": "^0.5.17"
+    "ollama": "^0.5.17",
+    "pdf-parse": "^1.1.1"
   },
   "scripts": {
     "start": "node index",
