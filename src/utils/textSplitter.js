@@ -1,42 +1,75 @@
-// utils/textSplitter.js
-function splitTextIntoChunks(text, chunkSizeChars = 1200, chunkOverlap = 200) {
-  if (!text || typeof text !== "string") return []; // Always return array
+// utils/textSplitter.js - NEW FILE
+function splitTextIntoChunks(text, chunkSize = 1000, overlap = 100) {
+  if (!text || typeof text !== "string") return [];
 
-  try {
-    const cleaned = text.replace(/\r\n/g, "\n").trim();
-    if (cleaned.length === 0) return []; // Return empty array
+  const chunks = [];
+  let start = 0;
 
-    const chunks = [];
-    let start = 0;
+  while (start < text.length) {
+    let end = start + chunkSize;
 
-    while (start < cleaned.length) {
-      const end = Math.min(start + chunkSizeChars, cleaned.length);
-      let chunk = cleaned.slice(start, end);
-
-      // try to cut at last newline or period inside the chunk for better boundaries
-      if (end < cleaned.length) {
-        const lastNewline = chunk.lastIndexOf("\n");
-        const lastPeriod = chunk.lastIndexOf(".");
-        const cutAt = Math.max(lastNewline, lastPeriod);
-        if (cutAt > Math.floor(chunk.length * 0.4)) {
-          chunk = chunk.slice(0, cutAt + 1);
+    // Try to break at sentence or word boundary
+    if (end < text.length) {
+      // Look for sentence end
+      const sentenceEnd = text.lastIndexOf(". ", end);
+      if (sentenceEnd > start + chunkSize * 0.8) {
+        end = sentenceEnd + 1;
+      } else {
+        // Look for word boundary
+        const wordEnd = text.lastIndexOf(" ", end);
+        if (wordEnd > start + chunkSize * 0.8) {
+          end = wordEnd;
         }
       }
-
-      const trimmedChunk = chunk.trim();
-      if (trimmedChunk.length > 0) {
-        chunks.push(trimmedChunk);
-      }
-
-      start += chunk.length - Math.min(chunkOverlap, chunk.length);
-      if (start <= 0) start = end; // Prevent infinite loops
     }
 
-    return chunks.filter((chunk) => chunk.length > 0); // Ensure we return array
-  } catch (error) {
-    console.error("Text splitting error:", error);
-    return []; // Always return array, even on error
+    const chunk = text.slice(start, end).trim();
+    if (chunk) {
+      chunks.push(chunk);
+    }
+
+    // Move start position with overlap
+    start = end - overlap;
+
+    // Prevent infinite loop
+    if (start >= text.length - 1) break;
+  }
+
+  return chunks;
+}
+
+// Memory-efficient streaming text splitter for very large texts
+function* splitTextIntoChunksGenerator(text, chunkSize = 1000, overlap = 100) {
+  if (!text || typeof text !== "string") return;
+
+  let start = 0;
+
+  while (start < text.length) {
+    let end = start + chunkSize;
+
+    if (end < text.length) {
+      const sentenceEnd = text.lastIndexOf(". ", end);
+      if (sentenceEnd > start + chunkSize * 0.8) {
+        end = sentenceEnd + 1;
+      } else {
+        const wordEnd = text.lastIndexOf(" ", end);
+        if (wordEnd > start + chunkSize * 0.8) {
+          end = wordEnd;
+        }
+      }
+    }
+
+    const chunk = text.slice(start, end).trim();
+    if (chunk) {
+      yield chunk;
+    }
+
+    start = end - overlap;
+    if (start >= text.length - 1) break;
   }
 }
 
-module.exports = { splitTextIntoChunks };
+module.exports = {
+  splitTextIntoChunks,
+  splitTextIntoChunksGenerator,
+};
