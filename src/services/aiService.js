@@ -3,21 +3,26 @@ const axios = require("axios");
 const DEFAULT_MODEL = "phi3:latest";
 const MAX_TOKENS = 2000;
 
-const streamAIResponse = (prompt, onData, onDone = () => {}) => {
+const streamAIResponse = (
+  prompt,
+  onData,
+  onDone = () => {},
+  reqAbortSignal
+) => {
   return new Promise((resolve, reject) => {
-    // Use the correct endpoint - /api/generate is the standard one
     axios
       .post(
-        "http://localhost:11434/api/generate", // Changed to correct endpoint
+        "http://localhost:11434/api/generate",
         {
           model: DEFAULT_MODEL,
-          prompt: prompt, // Changed from messages to prompt
+          prompt,
           stream: true,
-          options: {
-            num_predict: MAX_TOKENS,
-          },
+          options: { num_predict: MAX_TOKENS },
         },
-        { responseType: "stream" }
+        {
+          responseType: "stream",
+          signal: reqAbortSignal, // ✅ cancellation support
+        }
       )
       .then((responseStream) => {
         let isDone = false;
@@ -25,17 +30,13 @@ const streamAIResponse = (prompt, onData, onDone = () => {}) => {
 
         responseStream.data.on("data", (chunk) => {
           const lines = chunk.toString().split("\n").filter(Boolean);
-
           for (const line of lines) {
             try {
               const data = JSON.parse(line);
-
-              // Different response format for /api/generate
               if (data.response) {
                 onData(data.response);
                 fullResponse += data.response;
               }
-
               if (data.done) {
                 isDone = true;
                 onDone(fullResponse);
@@ -63,13 +64,6 @@ const streamAIResponse = (prompt, onData, onDone = () => {}) => {
       })
       .catch((err) => {
         console.error("❌ AI Service Error:", err.message);
-
-        // Provide more detailed error information
-        if (err.response) {
-          console.error("Status:", err.response.status);
-          console.error("Response data:", err.response.data);
-        }
-
         onDone();
         reject(err);
       });

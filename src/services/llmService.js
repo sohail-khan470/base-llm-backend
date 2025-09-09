@@ -1,41 +1,69 @@
 const axios = require("axios");
-require("dotenv").config();
+const { v4: uuidv4 } = require("uuid");
 const {
   generateEmbedding,
   storeEmbedding,
   queryContext,
+  queryContextByEmbedding,
 } = require("./embeddingService");
+require("dotenv").config();
 
-const DEFAULT_MODEL = "phi3:latest";
-const MAX_TOKENS = 2000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OLLAMA_GENERATE_ENDPOINT = "http://localhost:11434/api/generate";
-const OPENAI_CHAT_ENDPOINT = "https://api.openai.com/v1/chat/completions";
+const OLLAMA_GENERATE_ENDPOINT =
+  process.env.OLLAMA_GENERATE_ENDPOINT || "http://localhost:11434/api/generate";
+const OLLAMA_EMBED_ENDPOINT =
+  process.env.OLLAMA_EMBED_ENDPOINT || "http://localhost:11434/api/embeddings";
+
+const DEFAULT_MODEL_LOCAL = "phi3:latest"; // your local model name
+const DEFAULT_OPENAI_MODEL = "gpt-3.5-turbo";
+const MAX_TOKENS = 2000;
 
 const DEFAULT_SYSTEM_PROMPT = `
-You are an intelligent assistant designed to provide helpful and accurate responses. Use clear, concise language and maintain a friendly tone. If no prior context is available, assume a general knowledge base and respond to the best of your ability. When relevant, include examples or explanations to clarify your answer.
+You are an intelligent assistant. Use the provided context to answer concisely and accurately.
 `;
 
-async function streamAIResponse(prompt, onData, onDone = () => {}) {
-  let isStreamActive = true;
+/**
+ * Streams an LLM response and calls onData(token) for each chunk, then onDone(fullResponse).
+ * This function performs RAG: queries context and injects into prompt.
+ */
+async function streamAIResponse(
+  prompt,
+  onData,
+  onDone = () => {},
+  reqAbortSignal
+) {
+  // Build context (RAG)
+  const contextItems = await queryContext(prompt, 5);
+  const contextText = contextItems
+    .map((i, idx) => `Context ${idx + 1}: ${i.document}`)
+    .join("\n\n");
 
-  const context = await queryContext(prompt);
-  const contextText = context.length > 0 ? context.join("\n") : "";
-  const fullPrompt = `System: ${DEFAULT_SYSTEM_PROMPT}\nContext: ${contextText}\n\nPrompt: ${prompt}`;
+  const userContent = contextText
+    ? `${contextText}\n\nUser: ${prompt}`
+    : `User: ${prompt}`;
+
+  let isStreamActive = true;
+  let fullResponse = "";
+
+  // react to external abort (client disconnect)
+  if (reqAbortSignal) {
+    reqAbortSignal.addEventListener("abort", () => {
+      console.log("Request aborted by client");
+      isStreamActive = false;
+      onDone(fullResponse || "");
+    });
+  }
 
   if (OPENAI_API_KEY) {
+    // Use OpenAI streaming chat completions
     try {
-      console.log(
-        "Streaming with OpenAI, prompt:",
-        prompt.substring(0, 50) + "..."
-      );
       const response = await axios.post(
-        OPENAI_CHAT_ENDPOINT,
+        "https://api.openai.com/v1/chat/completions",
         {
-          model: "gpt-3.5-turbo",
+          model: DEFAULT_OPENAI_MODEL,
           messages: [
             { role: "system", content: DEFAULT_SYSTEM_PROMPT },
-            { role: "user", content: contextText + "\n\n" + prompt },
+            { role: "user", content: userContent },
           ],
           stream: true,
           max_tokens: MAX_TOKENS,
@@ -46,16 +74,16 @@ async function streamAIResponse(prompt, onData, onDone = () => {}) {
             "Content-Type": "application/json",
           },
           responseType: "stream",
+          timeout: 120000,
         }
       );
 
-      let fullResponse = "";
       response.data.on("data", (chunk) => {
         if (!isStreamActive) return;
         const lines = chunk.toString().split("\n").filter(Boolean);
         for (const line of lines) {
           if (line.startsWith("data: ")) {
-            const data = line.slice(6);
+            const data = line.slice(6).trim();
             if (data === "[DONE]") {
               isStreamActive = false;
               onDone(fullResponse);
@@ -63,24 +91,40 @@ async function streamAIResponse(prompt, onData, onDone = () => {}) {
             }
             try {
               const parsed = JSON.parse(data);
-              const content = parsed.choices[0].delta.content;
-              if (content) {
-                onData(content);
-                fullResponse += content;
+              const delta = parsed.choices?.[0]?.delta?.content;
+              if (delta) {
+                onData(delta);
+                fullResponse += delta;
               }
             } catch (err) {
-              console.error("OpenAI parse error:", err.message);
+              // ignore JSON parse errors for non-JSON lines
             }
           }
         }
       });
 
-      response.data.on("end", () => {
-        if (isStreamActive) {
-          console.log("OpenAI stream ended, storing response");
-          isStreamActive = false;
-          onDone(fullResponse);
-          storeEmbedding(Date.now().toString(), fullPrompt, fullResponse);
+      response.data.on("end", async () => {
+        if (!isStreamActive) {
+          return;
+        }
+        isStreamActive = false;
+        onDone(fullResponse);
+        // store response and prompt embeddings separately
+        try {
+          const promptEmb = await generateEmbedding(prompt);
+          const respEmb = await generateEmbedding(fullResponse);
+          const promptId = uuidv4();
+          const respId = uuidv4();
+          if (promptEmb)
+            await storeEmbedding(promptId, prompt, promptEmb, {
+              type: "prompt",
+            });
+          if (respEmb)
+            await storeEmbedding(respId, fullResponse, respEmb, {
+              type: "response",
+            });
+        } catch (err) {
+          console.error("Post-stream store error:", err.message);
         }
       });
 
@@ -92,31 +136,27 @@ async function streamAIResponse(prompt, onData, onDone = () => {}) {
         }
       });
     } catch (err) {
-      console.error("OpenAI error:", err.message);
-      if (isStreamActive) {
-        isStreamActive = false;
-        onDone("");
-      }
+      console.error("OpenAI generate error:", err.message || err);
+      onDone("");
       throw err;
     }
   } else {
+    // Ollama local streaming
     try {
-      console.log(
-        "Streaming with Ollama, prompt:",
-        prompt.substring(0, 50) + "..."
-      );
       const response = await axios.post(
         OLLAMA_GENERATE_ENDPOINT,
         {
-          model: DEFAULT_MODEL,
-          prompt: fullPrompt,
+          model: DEFAULT_MODEL_LOCAL,
+          prompt: `${DEFAULT_SYSTEM_PROMPT}\n\n${userContent}`,
           stream: true,
           options: { num_predict: MAX_TOKENS },
         },
-        { responseType: "stream" }
+        {
+          responseType: "stream",
+          timeout: 120000,
+        }
       );
 
-      let fullResponse = "";
       response.data.on("data", (chunk) => {
         if (!isStreamActive) return;
         const lines = chunk.toString().split("\n").filter(Boolean);
@@ -130,20 +170,33 @@ async function streamAIResponse(prompt, onData, onDone = () => {}) {
             if (data.done) {
               isStreamActive = false;
               onDone(fullResponse);
-              storeEmbedding(Date.now().toString(), fullPrompt, fullResponse);
+              return;
             }
           } catch (err) {
-            console.error("Ollama parse error:", err.message);
+            // ignore parse errors
           }
         }
       });
 
-      response.data.on("end", () => {
-        if (isStreamActive) {
-          console.log("Ollama stream ended, storing response");
-          isStreamActive = false;
-          onDone(fullResponse);
-          storeEmbedding(Date.now().toString(), fullPrompt, fullResponse);
+      response.data.on("end", async () => {
+        if (!isStreamActive) return;
+        isStreamActive = false;
+        onDone(fullResponse);
+        try {
+          const promptEmb = await generateEmbedding(prompt);
+          const respEmb = await generateEmbedding(fullResponse);
+          const promptId = uuidv4();
+          const respId = uuidv4();
+          if (promptEmb)
+            await storeEmbedding(promptId, prompt, promptEmb, {
+              type: "prompt",
+            });
+          if (respEmb)
+            await storeEmbedding(respId, fullResponse, respEmb, {
+              type: "response",
+            });
+        } catch (err) {
+          console.error("Post-stream store error:", err.message || err);
         }
       });
 
@@ -155,34 +208,30 @@ async function streamAIResponse(prompt, onData, onDone = () => {}) {
         }
       });
     } catch (err) {
-      console.error("Ollama error:", err.message);
-      if (isStreamActive) {
-        isStreamActive = false;
-        onDone("");
-      }
+      console.error("Ollama generate error:", err.message || err);
+      onDone("");
       throw err;
     }
   }
 }
 
-async function generateQA(context) {
-  const fallbackContext =
-    context ||
-    "General knowledge: Provide a question and answer pair based on common knowledge or the user's prompt.";
-  const prompt = `Based on the following context, generate a relevant question and answer pair:\n\n${fallbackContext}`;
-
-  let response;
-  if (OPENAI_API_KEY) {
-    try {
+/**
+ * generateQA(contextText) -> returns {question, answer}
+ * Uses LLM (OpenAI or Ollama) synchronously (non-stream) to create a Q/A pair.
+ */
+async function generateQA(contextText) {
+  const prompt = `Given the following context, generate one concise Question and its Answer.\n\nContext:\n${contextText}\n\nFormat:\nQuestion: <question>\nAnswer: <answer>\n`;
+  try {
+    if (OPENAI_API_KEY) {
       const res = await axios.post(
-        OPENAI_CHAT_ENDPOINT,
+        "https://api.openai.com/v1/chat/completions",
         {
-          model: "gpt-3.5-turbo",
+          model: DEFAULT_OPENAI_MODEL,
           messages: [
             { role: "system", content: DEFAULT_SYSTEM_PROMPT },
             { role: "user", content: prompt },
           ],
-          max_tokens: 500,
+          max_tokens: 300,
         },
         {
           headers: {
@@ -191,33 +240,29 @@ async function generateQA(context) {
           },
         }
       );
-      response = res.data.choices[0].message.content;
-    } catch (err) {
-      console.error("OpenAI Q/A error:", err.message);
-      return { question: "", answer: "" };
+      const text = res.data?.choices?.[0]?.message?.content || "";
+      const [qPart, aPart] = text.split("\nAnswer:");
+      const question = (qPart || "").replace(/^Question:\s*/i, "").trim();
+      const answer = (aPart || "").trim();
+      return { question, answer };
+    } else {
+      const res = await axios.post(
+        OLLAMA_GENERATE_ENDPOINT,
+        {
+          model: DEFAULT_MODEL_LOCAL,
+          prompt,
+          options: { num_predict: 300 },
+        },
+        { timeout: 30000 }
+      );
+      const text = res.data?.response || "";
+      const [qPart, aPart] = text.split("\nAnswer:");
+      const question = (qPart || "").replace(/^Question:\s*/i, "").trim();
+      const answer = (aPart || "").trim();
+      return { question, answer };
     }
-  } else {
-    try {
-      const res = await axios.post(OLLAMA_GENERATE_ENDPOINT, {
-        model: DEFAULT_MODEL,
-        prompt,
-        options: { num_predict: 500 },
-      });
-      response = res.data.response;
-    } catch (err) {
-      console.error("Ollama Q/A error:", err.message);
-      return { question: "", answer: "" };
-    }
-  }
-
-  try {
-    const [question, answer] = response.split("\nAnswer: ");
-    return {
-      question: question?.replace("Question: ", "") || "",
-      answer: answer || "",
-    };
   } catch (err) {
-    console.error("Q/A parsing error:", err.message);
+    console.error("generateQA error:", err.message || err);
     return { question: "", answer: "" };
   }
 }

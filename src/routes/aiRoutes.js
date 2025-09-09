@@ -1,9 +1,8 @@
 const express = require("express");
-const { aiController, fileController } = require("../controllers");
-
 const router = express.Router();
+const { chatWithAIStream, uploadFile } = require("../controllers/aiController");
 
-router.post("/chat", aiController.chatWithAIStream);
-router.post("/upload", fileController.uploadFile);
+router.post("/chat", chatWithAIStream);
+router.post("/upload", uploadFile);
 
 module.exports = router;

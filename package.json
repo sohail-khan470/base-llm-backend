@@ -8,10 +8,12 @@
     "express": "^5.1.0",
     "express-fileupload": "^1.5.2",
     "got": "^14.4.7",
+    "langchain": "^0.3.33",
     "mammoth": "^1.10.0",
     "nodemon": "^3.1.10",
     "ollama": "^0.5.17",
-    "pdf-parse": "^1.1.1"
+    "pdf-parse": "^1.1.1",
+    "uuid": "^13.0.0"
   },
   "scripts": {
     "start": "node index",
