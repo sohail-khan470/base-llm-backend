@@ -1,4 +1,3 @@
-// controllers/chatController.js - FIXED VERSION
 const { streamAIResponse, generateQA } = require("../services/llmService");
 const {
   generateEmbedding,
@@ -8,12 +7,11 @@ const {
 } = require("../services/embeddingService");
 const { splitTextIntoChunks } = require("../utils/textSplitter");
 const { v4: uuidv4 } = require("uuid");
-//const pdfjsLib = require("pdfjs-dist/legacy/build/pdf.js");
 const mammoth = require("mammoth");
 const pdf = require("pdf-parse");
-
-// Configure PDF.js worker
-//pdfjsLib.GlobalWorkerOptions.workerSrc = require("pdfjs-dist/legacy/build/pdf.worker.entry.js");
+const csv = require("csv-parser");
+const { Readable } = require("stream");
+const XLSX = require("xlsx");
 
 // Polyfill for DOMMatrix which is a browser API not available in Node.js
 if (typeof global.DOMMatrix === "undefined") {
@@ -62,6 +60,92 @@ if (typeof global.DOMMatrix === "undefined") {
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB limit
 const CHUNK_SIZE = 1000; // Smaller chunks to reduce memory
 const BATCH_SIZE = 5; // Process embeddings in batches
+
+// Supported MIME types (same as fileController)
+const SUPPORTED_TYPES = {
+  PDF: "application/pdf",
+  DOCX: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  TEXT: "text/plain",
+  CSV: "text/csv",
+  EXCEL: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  EXCEL_LEGACY: "application/vnd.ms-excel",
+};
+
+async function processCSVInStream(buffer, chunkCallback) {
+  return new Promise((resolve, reject) => {
+    const stream = Readable.from(buffer);
+    let rowCount = 0;
+    let chunk = "";
+
+    stream
+      .pipe(csv())
+      .on("data", (row) => {
+        rowCount++;
+        // Convert row object to key-value pairs
+        const rowText = Object.entries(row)
+          .map(([key, value]) => `${key}: ${value}`)
+          .join(", ");
+
+        chunk += rowText + "\n";
+
+        // Process in chunks of 50 rows
+        if (rowCount % 50 === 0) {
+          chunkCallback(chunk);
+          chunk = "";
+        }
+      })
+      .on("end", () => {
+        // Process any remaining rows
+        if (chunk.length > 0) {
+          chunkCallback(chunk);
+        }
+        resolve();
+      })
+      .on("error", (error) => {
+        console.error("CSV processing error:", error);
+        reject(error);
+      });
+  });
+}
+
+async function processExcelInStream(buffer, chunkCallback) {
+  try {
+    const workbook = XLSX.read(buffer, { type: "buffer" });
+    let fullText = "";
+
+    workbook.SheetNames.forEach((sheetName) => {
+      const worksheet = workbook.Sheets[sheetName];
+      const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+
+      // Add sheet name as context
+      fullText += `Sheet: ${sheetName}\n`;
+
+      // Process each row
+      jsonData.forEach((row, index) => {
+        // Skip empty rows
+        if (
+          row.some((cell) => cell !== null && cell !== undefined && cell !== "")
+        ) {
+          const rowText = Array.isArray(row)
+            ? row.map((cell) => String(cell || "")).join(", ")
+            : String(row);
+          fullText += `Row ${index + 1}: ${rowText}\n`;
+        }
+      });
+
+      fullText += "\n";
+    });
+
+    // Split the text into chunks
+    const chunks = splitTextIntoChunks(fullText, 1200, 200);
+    for (const chunk of chunks) {
+      await chunkCallback(chunk);
+    }
+  } catch (error) {
+    console.error("Excel processing error:", error);
+    throw error;
+  }
+}
 
 async function chatWithAIStream(req, res) {
   try {
@@ -132,13 +216,10 @@ async function uploadFile(req, res) {
     let chunks = [];
 
     try {
-      if (mimetype === "application/pdf") {
+      if (mimetype === SUPPORTED_TYPES.PDF) {
         // Use streaming PDF processing
         chunks = await processPDFStreaming(file.data);
-      } else if (
-        mimetype ===
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-      ) {
+      } else if (mimetype === SUPPORTED_TYPES.DOCX) {
         const mm = await mammoth.extractRawText({
           buffer: file.data,
           options: {
@@ -149,9 +230,22 @@ async function uploadFile(req, res) {
         chunks = splitTextIntoChunks(extractedText, CHUNK_SIZE, 100);
         // Clear the large text from memory
         mm.value = null;
-      } else if (mimetype === "text/plain") {
+      } else if (mimetype === SUPPORTED_TYPES.TEXT) {
         const extractedText = file.data.toString("utf8");
         chunks = splitTextIntoChunks(extractedText, CHUNK_SIZE, 100);
+      } else if (mimetype === SUPPORTED_TYPES.CSV) {
+        // Process CSV directly without extracting full text first
+        await processCSVInStream(file.data, (chunk) => {
+          chunks.push(chunk);
+        });
+      } else if (
+        mimetype === SUPPORTED_TYPES.EXCEL ||
+        mimetype === SUPPORTED_TYPES.EXCEL_LEGACY
+      ) {
+        // Process Excel files
+        await processExcelInStream(file.data, (chunk) => {
+          chunks.push(chunk);
+        });
       } else {
         return res.status(400).json({ error: "Unsupported file type" });
       }
@@ -191,6 +285,7 @@ async function uploadFile(req, res) {
               type: "file_chunk",
               filename: file.name,
               chunkIndex: chunkIndex,
+              fileType: mimetype,
             });
 
             storedChunks.push({ id, index: chunkIndex });
@@ -247,6 +342,7 @@ async function uploadFile(req, res) {
             await storeEmbedding(uuidv4(), qaText, qaEmb, {
               type: "file_qa",
               filename: file.name,
+              fileType: mimetype,
             });
           }
         }

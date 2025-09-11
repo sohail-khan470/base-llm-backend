@@ -8,6 +8,8 @@ const mammoth = require("mammoth");
 const csv = require("csv-parser");
 const { Readable } = require("stream");
 const XLSX = require("xlsx");
+const { v4: uuidv4 } = require("uuid");
+const { splitTextIntoChunks } = require("../utils/textSplitter");
 
 // Configure PDF.js worker
 pdfjsLib.GlobalWorkerOptions.workerSrc = require("pdfjs-dist/legacy/build/pdf.worker.entry.js");
@@ -162,11 +164,9 @@ async function uploadFile(req, res) {
 
     // Check file size
     if (file.size > MAX_FILE_SIZE) {
-      return res
-        .status(400)
-        .json({
-          error: `File size exceeds ${MAX_FILE_SIZE / 1024 / 1024}MB limit`,
-        });
+      return res.status(400).json({
+        error: `File size exceeds ${MAX_FILE_SIZE / 1024 / 1024}MB limit`,
+      });
     }
 
     let extractedText = "";
@@ -291,11 +291,9 @@ async function uploadFile(req, res) {
     });
   } catch (err) {
     console.error("uploadFile error:", err.message || err);
-    res
-      .status(500)
-      .json({
-        error: "Failed to process file: " + (err.message || "Unknown error"),
-      });
+    res.status(500).json({
+      error: "Failed to process file: " + (err.message || "Unknown error"),
+    });
   }
 }
 
