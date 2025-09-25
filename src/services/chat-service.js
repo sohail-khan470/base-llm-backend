@@ -1,0 +1,119 @@
+const Chat = require("../models/Chat");
+
+class ChatService {
+  async create(chatData) {
+    const chat = new Chat(chatData);
+    return await chat.save();
+  }
+
+  async findById(id, populateMessages = false) {
+    let query = Chat.findById(id).populate("organizationId").populate("userId");
+
+    if (populateMessages) {
+      query = query.populate("messages");
+    }
+
+    return await query;
+  }
+
+  async findByUser(userId) {
+    return await Chat.find({ userId })
+      .populate("organizationId")
+      .populate("userId")
+      .populate("messages")
+      .sort({ updatedAt: -1 });
+  }
+
+  async findByOrganization(organizationId) {
+    return await Chat.find({ organizationId })
+      .populate("organizationId")
+      .populate("userId")
+      .populate("messages")
+      .sort({ updatedAt: -1 });
+  }
+
+  async findAll() {
+    return await Chat.find()
+      .populate("organizationId")
+      .populate("userId")
+      .populate("messages")
+      .sort({ updatedAt: -1 });
+  }
+
+  async update(id, updateData) {
+    return await Chat.findByIdAndUpdate(id, updateData, {
+      new: true,
+      runValidators: true,
+    })
+      .populate("organizationId")
+      .populate("userId")
+      .populate("messages"); // include messages
+  }
+
+  async delete(id) {
+    return await Chat.findByIdAndDelete(id);
+  }
+
+  async addMessage(chatId, messageId) {
+    return await Chat.findByIdAndUpdate(
+      chatId,
+      { $push: { messages: messageId } },
+      { new: true }
+    )
+      .populate("organizationId")
+      .populate("userId")
+      .populate("messages");
+  }
+
+  async removeMessage(chatId, messageId) {
+    return await Chat.findByIdAndUpdate(
+      chatId,
+      { $pull: { messages: messageId } },
+      { new: true }
+    )
+      .populate("organizationId")
+      .populate("userId")
+      .populate("messages");
+  }
+
+  async getRecentChats(userId, limit = 10) {
+    return await Chat.find({ userId })
+      .populate("organizationId")
+      .populate("userId")
+      .populate("messages")
+      .limit(limit)
+      .sort({ updatedAt: -1 });
+  }
+
+  async updateTitle(id, title) {
+    return await this.update(id, { title });
+  }
+
+  async findByUserAndOrganization(userId, organizationId) {
+    try {
+      return await Chat.findOne({
+        userId,
+        organizationId,
+      })
+        .populate("userId")
+        .populate("organizationId")
+        .populate("messages");
+    } catch (err) {
+      throw new Error("Error fetching chat: " + err.message);
+    }
+  }
+
+  async findByIdAndUser(chatId, userId, organizationId) {
+    return await Chat.findOne({
+      _id: chatId,
+      userId,
+      organizationId,
+    })
+      .populate("organizationId")
+      .populate("userId")
+      .populate("messages")
+      .exec();
+  }
+}
+
+module.exports = new ChatService();

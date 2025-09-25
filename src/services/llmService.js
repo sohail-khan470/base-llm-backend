@@ -2,25 +2,22 @@ const axios = require("axios");
 const { v4: uuidv4 } = require("uuid");
 const {
   generateEmbedding,
-  storeEmbedding,
+  storeUserChatContext,
   queryContext,
-  queryContextByEmbedding,
 } = require("./embeddingService");
 require("dotenv").config();
+const {
+  OPENAI_API_KEY,
+  OLLAMA_EMBED_ENDPOINT,
+  OLLAMA_GENERATE_ENDPOINT,
+} = require("../config/server-config");
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OLLAMA_GENERATE_ENDPOINT =
-  process.env.OLLAMA_GENERATE_ENDPOINT || "http://localhost:11434/api/generate";
-const OLLAMA_EMBED_ENDPOINT =
-  process.env.OLLAMA_EMBED_ENDPOINT || "http://localhost:11434/api/embeddings";
-
-const DEFAULT_MODEL_LOCAL = "phi3:latest"; // your local model name
-const DEFAULT_OPENAI_MODEL = "gpt-3.5-turbo";
+const DEFAULT_MODEL_LOCAL =
+  process.env.DEFAULT_MODEL_LOCAL || "llama3.1:latest";
+const DEFAULT_OPENAI_MODEL =
+  process.env.DEFAULT_OPENAI_MODEL || "gpt-3.5-turbo";
 const MAX_TOKENS = 2000;
-
-const DEFAULT_SYSTEM_PROMPT = `
-You are an intelligent assistant. Use the provided context to answer concisely and accurately.
-`;
+const DEFAULT_SYSTEM_PROMPT = `You are an intelligent assistant. Use the provided context to answer concisely and accurately.`;
 
 /**
  * Streams an LLM response and calls onData(token) for each chunk, then onDone(fullResponse).
@@ -30,29 +27,40 @@ async function streamAIResponse(
   prompt,
   onData,
   onDone = () => {},
-  reqAbortSignal
+  reqAbortSignal,
+  organizationId,
+  userId
 ) {
+  // Create a proper AbortController for axios
+  const controller = new AbortController();
+  let isStreamActive = true;
+  let fullResponse = "";
+
+  // React to external abort (client disconnect)
+  if (reqAbortSignal) {
+    // Use a simple flag-based approach instead of signal linking
+    reqAbortSignal.addEventListener("abort", () => {
+      console.log("Request aborted by client");
+      isStreamActive = false;
+      controller.abort();
+    });
+  }
+
   // Build context (RAG)
-  const contextItems = await queryContext(prompt, 5);
+  const contextItems = await queryCombinedContext(
+    prompt,
+    organizationId,
+    userId,
+    5
+  );
+
   const contextText = contextItems
-    .map((i, idx) => `Context ${idx + 1}: ${i.document}`)
+    .map((i, idx) => `[${i.source}] Context ${idx + 1}: ${i.document}`)
     .join("\n\n");
 
   const userContent = contextText
     ? `${contextText}\n\nUser: ${prompt}`
     : `User: ${prompt}`;
-
-  let isStreamActive = true;
-  let fullResponse = "";
-
-  // react to external abort (client disconnect)
-  if (reqAbortSignal) {
-    reqAbortSignal.addEventListener("abort", () => {
-      console.log("Request aborted by client");
-      isStreamActive = false;
-      onDone(fullResponse || "");
-    });
-  }
 
   if (OPENAI_API_KEY) {
     // Use OpenAI streaming chat completions
@@ -75,6 +83,7 @@ async function streamAIResponse(
           },
           responseType: "stream",
           timeout: 120000,
+          signal: controller.signal,
         }
       );
 
@@ -97,32 +106,34 @@ async function streamAIResponse(
                 fullResponse += delta;
               }
             } catch (err) {
-              // ignore JSON parse errors for non-JSON lines
+              // Ignore JSON parse errors for non-JSON lines
             }
           }
         }
       });
 
       response.data.on("end", async () => {
-        if (!isStreamActive) {
-          return;
-        }
+        if (!isStreamActive) return;
         isStreamActive = false;
         onDone(fullResponse);
-        // store response and prompt embeddings separately
+
+        // Store prompt and response with proper user context
         try {
           const promptEmb = await generateEmbedding(prompt);
           const respEmb = await generateEmbedding(fullResponse);
-          const promptId = uuidv4();
-          const respId = uuidv4();
-          if (promptEmb)
-            await storeEmbedding(promptId, prompt, promptEmb, {
+
+          if (promptEmb) {
+            await storeUserMessage(userId, uuidv4(), prompt, promptEmb, {
               type: "prompt",
+              organizationId: organizationId,
             });
-          if (respEmb)
-            await storeEmbedding(respId, fullResponse, respEmb, {
+          }
+          if (respEmb) {
+            await storeUserMessage(userId, uuidv4(), fullResponse, respEmb, {
               type: "response",
+              organizationId: organizationId,
             });
+          }
         } catch (err) {
           console.error("Post-stream store error:", err.message);
         }
@@ -141,7 +152,7 @@ async function streamAIResponse(
       throw err;
     }
   } else {
-    // Ollama local streaming
+    // Ollama local streaming - Remove signal from Ollama request
     try {
       const response = await axios.post(
         OLLAMA_GENERATE_ENDPOINT,
@@ -154,6 +165,7 @@ async function streamAIResponse(
         {
           responseType: "stream",
           timeout: 120000,
+          // Remove signal from Ollama config to avoid the error
         }
       );
 
@@ -173,7 +185,7 @@ async function streamAIResponse(
               return;
             }
           } catch (err) {
-            // ignore parse errors
+            // Ignore parse errors
           }
         }
       });
@@ -182,19 +194,18 @@ async function streamAIResponse(
         if (!isStreamActive) return;
         isStreamActive = false;
         onDone(fullResponse);
+        // Store prompt and response in user-specific chat collection
         try {
           const promptEmb = await generateEmbedding(prompt);
           const respEmb = await generateEmbedding(fullResponse);
           const promptId = uuidv4();
           const respId = uuidv4();
-          if (promptEmb)
-            await storeEmbedding(promptId, prompt, promptEmb, {
-              type: "prompt",
-            });
-          if (respEmb)
-            await storeEmbedding(respId, fullResponse, respEmb, {
-              type: "response",
-            });
+          if (promptEmb) {
+            await storeUserChatContext(userId, promptId, prompt, promptEmb);
+          }
+          if (respEmb) {
+            await storeUserChatContext(userId, respId, fullResponse, respEmb);
+          }
         } catch (err) {
           console.error("Post-stream store error:", err.message || err);
         }
@@ -208,6 +219,7 @@ async function streamAIResponse(
         }
       });
     } catch (err) {
+      console.log(err);
       console.error("Ollama generate error:", err.message || err);
       onDone("");
       throw err;
@@ -265,6 +277,29 @@ async function generateQA(contextText) {
     console.error("generateQA error:", err.message || err);
     return { question: "", answer: "" };
   }
+}
+
+// Helper function to store user messages
+async function storeUserMessage(
+  userId,
+  messageId,
+  content,
+  embedding,
+  metadata = {}
+) {
+  // Implement your storage logic here
+  console.log("Storing user message:", {
+    userId,
+    messageId,
+    content,
+    metadata,
+  });
+}
+
+// Helper function to query combined context
+async function queryCombinedContext(prompt, organizationId, userId, limit) {
+  // Implement your context querying logic here
+  return []; // Return array of context items
 }
 
 module.exports = { streamAIResponse, generateQA };

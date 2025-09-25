@@ -1,16 +1,14 @@
-// services/embeddingService.js - MODIFIED VERSION
 const { getOrCreateCollection } = require("../config/chroma");
 const axios = require("axios");
+const {
+  OPENAI_API_KEY,
+  OLLAMA_EMBED_ENDPOINT,
+  OPENAI_EMBED_ENDPOINT,
+} = require("../config/server-config");
 require("dotenv").config();
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_EMBED_ENDPOINT = "https://api.openai.com/v1/embeddings";
-const OLLAMA_EMBED_ENDPOINT =
-  process.env.OLLAMA_EMBED_ENDPOINT || "http://localhost:11434/api/embeddings";
-
-// Reduced text limits to prevent memory issues
-const MAX_TEXT_LENGTH = 4000; // Reduced from 8000
-const EMBEDDING_TIMEOUT = 20000; // 20 seconds timeout
+const MAX_TEXT_LENGTH = 4000;
+const EMBEDDING_TIMEOUT = 20000;
 
 async function generateEmbedding(text) {
   if (!text || typeof text !== "string" || text.trim() === "") {
@@ -18,19 +16,14 @@ async function generateEmbedding(text) {
     return null;
   }
 
-  // More aggressive truncation to prevent memory issues
   const truncatedText =
     text.length > MAX_TEXT_LENGTH ? text.substring(0, MAX_TEXT_LENGTH) : text;
 
-  // Prefer OpenAI if API key present
   if (OPENAI_API_KEY) {
     try {
       const resp = await axios.post(
         OPENAI_EMBED_ENDPOINT,
-        {
-          input: truncatedText,
-          model: "text-embedding-ada-002",
-        },
+        { input: truncatedText, model: "text-embedding-ada-002" },
         {
           headers: {
             Authorization: `Bearer ${OPENAI_API_KEY}`,
@@ -41,12 +34,8 @@ async function generateEmbedding(text) {
           maxBodyLength: Infinity,
         }
       );
-
       const embedding = resp.data?.data?.[0]?.embedding;
-
-      // Clear response from memory
       resp.data = null;
-
       if (!Array.isArray(embedding) || embedding.length === 0) return null;
       return embedding;
     } catch (err) {
@@ -55,26 +44,18 @@ async function generateEmbedding(text) {
     }
   }
 
-  // Fallback to Ollama (local)
   try {
     const resp = await axios.post(
       OLLAMA_EMBED_ENDPOINT,
-      {
-        model: "nomic-embed-text:latest",
-        prompt: truncatedText,
-      },
+      { model: "nomic-embed-text:latest", prompt: truncatedText },
       {
         timeout: EMBEDDING_TIMEOUT,
         maxContentLength: Infinity,
         maxBodyLength: Infinity,
       }
     );
-
     const embedding = resp.data?.embedding || resp.data?.data?.[0]?.embedding;
-
-    // Clear response from memory
     resp.data = null;
-
     if (!Array.isArray(embedding) || embedding.length === 0) {
       console.error("Ollama embedding: unexpected response");
       return null;
@@ -86,40 +67,37 @@ async function generateEmbedding(text) {
   }
 }
 
-// Modified to handle arrays of text for batch processing
 async function generateEmbeddings(texts) {
   if (!Array.isArray(texts)) {
     const result = await generateEmbedding(texts);
     return result ? [result] : [];
   }
-
   const embeddings = [];
-
-  // Process one at a time to avoid memory spike
   for (const text of texts) {
     try {
       const emb = await generateEmbedding(text);
       embeddings.push(emb);
-
-      // Small delay between embeddings to prevent overwhelming the service
       await new Promise((resolve) => setTimeout(resolve, 50));
     } catch (err) {
       console.error("Batch embedding error:", err.message);
       embeddings.push(null);
     }
   }
-
   return embeddings;
 }
 
-async function storeEmbedding(ids, texts, embeddings, metadatas = []) {
-  // Handle both single and batch storage
+async function storeEmbedding(
+  ids,
+  texts,
+  embeddings,
+  metadatas = [],
+  organizationId
+) {
   const idArray = Array.isArray(ids) ? ids : [ids];
   const textArray = Array.isArray(texts) ? texts : [texts];
   const embArray = Array.isArray(embeddings[0]) ? embeddings : [embeddings];
   const metaArray = Array.isArray(metadatas) ? metadatas : [metadatas];
 
-  // Validate all embeddings
   const validIndices = [];
   for (let i = 0; i < embArray.length; i++) {
     if (Array.isArray(embArray[i]) && embArray[i].length > 0) {
@@ -132,28 +110,30 @@ async function storeEmbedding(ids, texts, embeddings, metadatas = []) {
     return;
   }
 
-  // Filter to only valid items
   const validIds = validIndices.map((i) => idArray[i]);
   const validTexts = validIndices.map((i) => textArray[i]);
   const validEmbs = validIndices.map((i) => embArray[i]);
-  const validMetas = validIndices.map((i) => metaArray[i] || {});
+  const validMetas = validIndices.map(
+    (i) => ({ ...metaArray[i], organizationId } || { organizationId })
+  );
 
   try {
-    const collection = await getOrCreateCollection("chat_context");
+    // Determine collection based on metadata type
+    const collectionName =
+      validMetas[0]?.type === "chat"
+        ? `user_${validMetas[0].userId}_chats`
+        : `org_${organizationId}_docs`;
+    const collection = await getOrCreateCollection(collectionName);
 
-    // Store in smaller batches if necessary
     const STORE_BATCH_SIZE = 10;
     for (let i = 0; i < validIds.length; i += STORE_BATCH_SIZE) {
       const batchEnd = Math.min(i + STORE_BATCH_SIZE, validIds.length);
-
       await collection.add({
         ids: validIds.slice(i, batchEnd),
         documents: validTexts.slice(i, batchEnd),
         embeddings: validEmbs.slice(i, batchEnd),
         metadatas: validMetas.slice(i, batchEnd),
       });
-
-      // Small delay between batch stores
       if (batchEnd < validIds.length) {
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
@@ -164,31 +144,71 @@ async function storeEmbedding(ids, texts, embeddings, metadatas = []) {
   }
 }
 
-async function queryContextByEmbedding(embedding, nResults = 5) {
-  if (!Array.isArray(embedding) || embedding.length === 0) return [];
-
+async function storeUserChatContext(userId, chatId, message, embedding) {
   try {
-    const collection = await getOrCreateCollection("chat_context");
+    const collection = await getOrCreateCollection(`user_${userId}_chats`);
+    const id = `${chatId}_${Date.now()}`;
+    await collection.add({
+      ids: [id],
+      documents: [message],
+      embeddings: [embedding],
+      metadatas: [{ userId, type: "chat", organizationId: null }],
+    });
+  } catch (err) {
+    console.error("storeUserChatContext error:", err.message);
+    throw err;
+  }
+}
+
+async function storeOrgDocumentContext(
+  organizationId,
+  documentId,
+  text,
+  embedding
+) {
+  try {
+    const collection = await getOrCreateCollection(
+      `org_${organizationId}_docs`
+    );
+    const id = `${documentId}_${Date.now()}`;
+    await collection.add({
+      ids: [id],
+      documents: [text],
+      embeddings: [embedding],
+      metadatas: [{ organizationId, type: "document" }],
+    });
+  } catch (err) {
+    console.error("storeOrgDocumentContext error:", err.message);
+    throw err;
+  }
+}
+
+async function queryContextByEmbedding(
+  embedding,
+  nResults = 5,
+  collectionName
+) {
+  if (!Array.isArray(embedding) || embedding.length === 0) return [];
+  try {
+    const collection = await getOrCreateCollection(collectionName);
     const results = await collection.query({
       queryEmbeddings: [embedding],
-      nResults: Math.min(nResults, 10), // Limit max results to prevent memory issues
+      nResults: Math.min(nResults, 10),
       include: ["documents", "metadatas", "distances"],
     });
 
-    // Properly handle the nested array structure
     const docs = results.documents?.[0] || [];
     const metas = results.metadatas?.[0] || [];
     const distances = results.distances?.[0] || [];
     const ids = results.ids?.[0] || [];
 
     const items = ids.map((id, i) => ({
-      id: id,
+      id,
       document: docs[i] || "",
       metadata: metas[i] || {},
       distance: distances[i] ?? null,
     }));
 
-    // Clear results from memory
     results.documents = null;
     results.metadatas = null;
     results.distances = null;
@@ -201,17 +221,41 @@ async function queryContextByEmbedding(embedding, nResults = 5) {
   }
 }
 
-async function queryContext(prompt, nResults = 5) {
+async function queryContext(prompt, nResults = 5, organizationId, userId) {
   if (!prompt || typeof prompt !== "string") return [];
   const emb = await generateEmbedding(prompt);
   if (!emb) return [];
-  return await queryContextByEmbedding(emb, nResults);
+
+  // Query organization documents
+  const orgCollection = `org_${organizationId}_docs`;
+  const orgResults = await queryContextByEmbedding(
+    emb,
+    nResults,
+    orgCollection
+  );
+
+  // Query user chat history
+  const userCollection = `user_${userId}_chats`;
+  const userResults = await queryContextByEmbedding(
+    emb,
+    nResults,
+    userCollection
+  );
+
+  // Combine and sort by distance, limit to nResults
+  const combinedResults = [...orgResults, ...userResults]
+    .sort((a, b) => (a.distance || 0) - (b.distance || 0))
+    .slice(0, nResults);
+
+  return combinedResults;
 }
 
 module.exports = {
   generateEmbedding,
-  generateEmbeddings, // New batch function
+  generateEmbeddings,
   storeEmbedding,
+  storeUserChatContext,
+  storeOrgDocumentContext,
   queryContextByEmbedding,
   queryContext,
 };

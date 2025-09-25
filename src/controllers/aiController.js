@@ -1,9 +1,11 @@
-const { streamAIResponse, generateQA } = require("../services/llmService");
+const ChatService = require("../services/chat-service");
+const MessageService = require("../services/message-service");
+const DocumentService = require("../services/document-service");
+const { streamAIResponse, generateQA } = require("../services/aiService");
 const {
   generateEmbedding,
-  storeEmbedding,
-  queryContext,
-  queryContextByEmbedding,
+  storeOrgDocumentContext,
+  getOrCreateCollection,
 } = require("../services/embeddingService");
 const { splitTextIntoChunks } = require("../utils/textSplitter");
 const { v4: uuidv4 } = require("uuid");
@@ -12,56 +14,15 @@ const pdf = require("pdf-parse");
 const csv = require("csv-parser");
 const { Readable } = require("stream");
 const XLSX = require("xlsx");
-
-// Polyfill for DOMMatrix which is a browser API not available in Node.js
-if (typeof global.DOMMatrix === "undefined") {
-  global.DOMMatrix = class DOMMatrix {
-    constructor(matrix) {
-      this.a = 1;
-      this.b = 0;
-      this.c = 0;
-      this.d = 1;
-      this.e = 0;
-      this.f = 0;
-
-      if (matrix) {
-        if (typeof matrix === "string") {
-          // Simple parsing for matrix string
-          const values = matrix
-            .replace(/matrix\(|\)/g, "")
-            .split(",")
-            .map(Number);
-          if (values.length === 6) {
-            this.a = values[0];
-            this.b = values[1];
-            this.c = values[2];
-            this.d = values[3];
-            this.e = values[4];
-            this.f = values[5];
-          }
-        }
-      }
-    }
-
-    multiply(other) {
-      return new DOMMatrix();
-    }
-
-    translate(tx, ty) {
-      return new DOMMatrix();
-    }
-
-    scale(sx, sy) {
-      return new DOMMatrix();
-    }
-  };
-}
+const fs = require("fs").promises;
+const path = require("path");
+const chatService = require("../services/chat-service");
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB limit
 const CHUNK_SIZE = 1000; // Smaller chunks to reduce memory
 const BATCH_SIZE = 5; // Process embeddings in batches
 
-// Supported MIME types (same as fileController)
+// Supported MIME types
 const SUPPORTED_TYPES = {
   PDF: "application/pdf",
   DOCX: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -147,41 +108,6 @@ async function processExcelInStream(buffer, chunkCallback) {
   }
 }
 
-async function chatWithAIStream(req, res) {
-  try {
-    const { prompt } = req.body;
-    if (!prompt || typeof prompt !== "string") {
-      return res.status(400).json({ error: "prompt required" });
-    }
-
-    res.setHeader("Content-Type", "text/plain; charset=utf-8");
-
-    const abortController = new AbortController();
-    req.on("close", () => {
-      abortController.abort();
-    });
-
-    const onData = (token) => {
-      try {
-        res.write(token);
-      } catch (err) {
-        console.error("res.write error:", err.message || err);
-      }
-    };
-
-    const onDone = async (fullResponse) => {
-      if (!res.writableEnded) res.end();
-    };
-
-    await streamAIResponse(prompt, onData, onDone, abortController.signal);
-  } catch (err) {
-    console.error("chatWithAIStream error:", err.message || err);
-    if (!res.headersSent)
-      res.status(500).json({ error: "Internal server error" });
-    else if (!res.writableEnded) res.end();
-  }
-}
-
 async function processPDFStreaming(buffer) {
   try {
     const data = await pdf(buffer);
@@ -193,14 +119,153 @@ async function processPDFStreaming(buffer) {
   }
 }
 
-async function uploadFile(req, res) {
+async function chatWithAIStream(req, res) {
+  let messagesSaved = false;
+
   try {
-    if (!req.files || !req.files.file) {
-      return res.status(400).json({ error: "No file uploaded" });
+    const { prompt } = req.body;
+    const userId = req.user._id;
+    const organizationId = req.user.organizationId._id;
+
+    console.log("🔍 DEBUG - chatWithAIStream started:", {
+      promptLength: prompt?.length,
+      userId,
+      organizationId,
+    });
+
+    if (!prompt || typeof prompt !== "string") {
+      return res.status(400).json({ error: "prompt required" });
     }
 
-    const file = req.files.file;
-    const mimetype = file.mimetype;
+    if (!organizationId || !userId) {
+      return res.status(401).json({ error: "Authentication required" });
+    }
+
+    // Create or fetch chat
+    let chat = await ChatService.findByUserAndOrganization(
+      userId,
+      organizationId
+    );
+    console.log("🔍 DEBUG - Chat found:", chat?.length);
+
+    if (!chat || !chat.length) {
+      chat = await ChatService.create({
+        userId,
+        organizationId,
+        title: prompt.slice(0, 50),
+      });
+      console.log("🔍 DEBUG - New chat created:", chat._id);
+    } else {
+      chat = chat[0];
+      console.log("🔍 DEBUG - Existing chat used:", chat._id);
+    }
+
+    // Fetch organization documents
+    const docs = await DocumentService.findByOrganizationAndUser(
+      userId,
+      organizationId
+    );
+    const docContext = docs.map((doc) => doc.filename).join("\n");
+    console.log("🔍 DEBUG - Documents found:", docs.length);
+
+    // Fetch user chat history
+    const messages = await MessageService.findByChat(chat._id);
+    const chatHistory = messages
+      .map((msg) => `${msg.role}: ${msg.content}`)
+      .join("\n");
+    console.log("🔍 DEBUG - Messages found:", messages.length);
+
+    // Combine context
+    const fullPrompt = `${docContext}\n\n${chatHistory}\n\nUser: ${prompt}`;
+    console.log("🔍 DEBUG - Full prompt length:", fullPrompt.length);
+
+    // Stream AI response
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+
+    const abortSignal =
+      req.signal && typeof req.signal.addEventListener === "function"
+        ? req.signal
+        : null;
+
+    console.log("🔍 DEBUG - Calling streamAIResponse");
+
+    await streamAIResponse(
+      fullPrompt,
+      (token) => {
+        console.log("🔍 DEBUG - Streaming token:", token.length);
+        res.write(`data: ${JSON.stringify({ token })}\n\n`);
+      },
+      async (fullResponse) => {
+        if (messagesSaved) {
+          console.log("🔍 DEBUG - Messages already saved, skipping");
+          return;
+        }
+
+        console.log(
+          "🔍 DEBUG - Stream completed, full response length:",
+          fullResponse?.length || 0
+        );
+
+        try {
+          messagesSaved = true; // ✅ Set flag before creating messages
+
+          // Save user message
+          const userMsg = await MessageService.create({
+            chatId: chat._id,
+            role: "user",
+            content: prompt,
+          });
+          await chatService.addMessage(chat._id, userMsg._id);
+          console.log("🔍 DEBUG - User message saved:", userMsg._id);
+
+          // Only save AI message if we have a response
+          if (fullResponse && fullResponse.trim().length > 0) {
+            const aiMessage = await MessageService.create({
+              chatId: chat._id,
+              role: "assistant",
+              content: fullResponse,
+            });
+            await chatService.addMessage(chat._id, aiMessage._id);
+            console.log("🔍 DEBUG - AI message saved:", aiMessage._id);
+          } else {
+            console.log("🔍 DEBUG - Empty AI response, not saving");
+          }
+        } catch (msgError) {
+          console.error("🔍 DEBUG - Message save error:", msgError);
+          // Don't throw here to avoid breaking the stream
+        }
+
+        res.write(`data: [DONE]\n\n`);
+        res.end();
+        console.log("🔍 DEBUG - Response stream ended");
+      },
+      abortSignal
+    );
+  } catch (err) {
+    console.log("🔍 DEBUG - chatWithAIStream ERROR:", err);
+    console.error("chatWithAIStream error:", err.message || err);
+
+    if (!res.headersSent) {
+      res.write(
+        `data: ${JSON.stringify({ error: "Internal server error" })}\n\n`
+      );
+    }
+
+    if (!res.writableEnded) {
+      res.end();
+    }
+  }
+}
+
+async function uploadFile(req, res) {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded" });
+    }
+    const { id: userId, organizationId } = req.user; // From auth middleware
+    const file = req.file;
 
     // Enforce file size limit
     if (file.size > MAX_FILE_SIZE) {
@@ -211,39 +276,43 @@ async function uploadFile(req, res) {
       });
     }
 
-    console.log(`Processing file: ${file.name} (${file.size} bytes)`);
+    // Check for duplicate filename in organization
+    const existingDocs = await DocumentService.findByOrganization(
+      organizationId
+    );
+    if (existingDocs.some((doc) => doc.filename === file.originalname)) {
+      return res
+        .status(400)
+        .json({ error: "File already exists in organization" });
+    }
 
     let chunks = [];
+    const mimetype = file.mimetype;
 
+    // Process file based on MIME type
     try {
       if (mimetype === SUPPORTED_TYPES.PDF) {
-        // Use streaming PDF processing
-        chunks = await processPDFStreaming(file.data);
+        chunks = await processPDFStreaming(file.buffer);
       } else if (mimetype === SUPPORTED_TYPES.DOCX) {
         const mm = await mammoth.extractRawText({
-          buffer: file.data,
-          options: {
-            includeDefaultStyleMap: false, // Reduce memory usage
-          },
+          buffer: file.buffer,
+          options: { includeDefaultStyleMap: false },
         });
         const extractedText = mm.value || "";
         chunks = splitTextIntoChunks(extractedText, CHUNK_SIZE, 100);
-        // Clear the large text from memory
-        mm.value = null;
+        mm.value = null; // Clear memory
       } else if (mimetype === SUPPORTED_TYPES.TEXT) {
-        const extractedText = file.data.toString("utf8");
+        const extractedText = file.buffer.toString("utf8");
         chunks = splitTextIntoChunks(extractedText, CHUNK_SIZE, 100);
       } else if (mimetype === SUPPORTED_TYPES.CSV) {
-        // Process CSV directly without extracting full text first
-        await processCSVInStream(file.data, (chunk) => {
+        await processCSVInStream(file.buffer, (chunk) => {
           chunks.push(chunk);
         });
       } else if (
         mimetype === SUPPORTED_TYPES.EXCEL ||
         mimetype === SUPPORTED_TYPES.EXCEL_LEGACY
       ) {
-        // Process Excel files
-        await processExcelInStream(file.data, (chunk) => {
+        await processExcelInStream(file.buffer, (chunk) => {
           chunks.push(chunk);
         });
       } else {
@@ -256,113 +325,90 @@ async function uploadFile(req, res) {
         .json({ error: "Failed to extract text from file" });
     }
 
-    // Process embeddings in batches to avoid memory overload
+    // Process embeddings in batches
     const storedChunks = [];
     const totalChunks = chunks.length;
-
     for (let i = 0; i < totalChunks; i += BATCH_SIZE) {
       const batch = chunks.slice(i, Math.min(i + BATCH_SIZE, totalChunks));
+      for (let j = 0; j < batch.length; j++) {
+        const chunk = batch[j];
+        const chunkIndex = i + j;
+        if (!chunk || chunk.trim().length === 0) continue;
 
-      try {
-        // Process each chunk in the batch individually to avoid array memory buildup
-        for (let j = 0; j < batch.length; j++) {
-          const chunk = batch[j];
-          const chunkIndex = i + j;
-
-          if (!chunk || chunk.trim().length === 0) continue;
-
-          try {
-            const emb = await generateEmbedding(chunk);
-            if (!emb) {
-              console.warn(
-                `Skipping chunk ${chunkIndex} due to null embedding`
-              );
-              continue;
-            }
-
-            const id = uuidv4();
-            await storeEmbedding(id, chunk, emb, {
-              type: "file_chunk",
-              filename: file.name,
-              chunkIndex: chunkIndex,
-              fileType: mimetype,
-            });
-
-            storedChunks.push({ id, index: chunkIndex });
-          } catch (embErr) {
-            console.error(
-              `Error processing chunk ${chunkIndex}:`,
-              embErr.message
-            );
-            // Continue with next chunk instead of failing entire upload
+        try {
+          const emb = await generateEmbedding(chunk);
+          if (!emb) {
+            console.warn(`Skipping chunk ${chunkIndex} due to null embedding`);
+            continue;
           }
+
+          const id = uuidv4();
+          await storeOrgDocumentContext(organizationId, id, chunk, emb);
+          storedChunks.push({ id, index: chunkIndex });
+        } catch (embErr) {
+          console.error(
+            `Error processing chunk ${chunkIndex}:`,
+            embErr.message
+          );
         }
-
-        // Clear batch from memory and allow GC
-        batch.length = 0;
-
-        // Add delay between batches to prevent overwhelming the system
-        await new Promise((resolve) => setTimeout(resolve, 100));
-
-        // Send progress update if needed (optional)
-        console.log(
-          `Processed ${Math.min(
-            i + BATCH_SIZE,
-            totalChunks
-          )}/${totalChunks} chunks`
-        );
-      } catch (batchErr) {
-        console.error(
-          `Batch processing error at index ${i}:`,
-          batchErr.message
-        );
-        // Continue with next batch
       }
+      // Clear batch from memory
+      batch.length = 0;
+      await new Promise((resolve) => setTimeout(resolve, 100));
     }
+    chunks = null; // Clear memory
 
-    // Clear chunks array from memory
-    chunks = null;
-
-    // Generate QA only for small files to save memory
+    // Generate QA for small files
     let qa = null;
     if (file.size < 100 * 1024 && storedChunks.length > 0) {
-      // Only for files under 100KB
       try {
-        // Use only first few stored chunks for QA generation
         const qaContextIds = storedChunks.slice(0, 3).map((sc) => sc.id);
-        const qaContext = qaContextIds.join(" "); // Simplified context
-
+        const qaContext = qaContextIds.join(" ");
         qa = await generateQA(qaContext);
-
         if (qa && qa.question && qa.answer) {
           const qaText = `Question: ${qa.question}\nAnswer: ${qa.answer}`;
           const qaEmb = await generateEmbedding(qaText);
-
           if (qaEmb) {
-            await storeEmbedding(uuidv4(), qaText, qaEmb, {
-              type: "file_qa",
-              filename: file.name,
-              fileType: mimetype,
-            });
+            await storeOrgDocumentContext(
+              organizationId,
+              uuidv4(),
+              qaText,
+              qaEmb
+            );
           }
         }
       } catch (qaErr) {
         console.error("QA generation error:", qaErr.message);
-        // Continue without QA if it fails
       }
     }
 
-    // Force garbage collection if available (optional)
-    if (global.gc) {
-      global.gc();
-    }
+    // Save document metadata
+    const document = await DocumentService.create({
+      organizationId,
+      uploadedBy: userId,
+      filename: file.originalname,
+      docType: mimetype.includes("pdf")
+        ? "pdf"
+        : mimetype.includes("markdown")
+        ? "md"
+        : mimetype.includes("csv")
+        ? "csv"
+        : mimetype.includes("excel")
+        ? "excel"
+        : "txt",
+      chromaIds: storedChunks.map((sc) => sc.id),
+    });
+
+    // Clean up temporary file
+    await fs.unlink(file.path);
 
     res.json({
       message: "File processed successfully",
-      fileName: file.name,
+      fileName: file.originalname,
       fileSize: file.size,
       chunksStored: storedChunks.length,
-      qa: qa,
+      qa,
+      document,
     });
   } catch (err) {
     console.error("uploadFile error:", err);
@@ -370,4 +416,82 @@ async function uploadFile(req, res) {
   }
 }
 
-module.exports = { chatWithAIStream, uploadFile };
+async function getUserChats(req, res) {
+  try {
+    const { id: userId, organizationId } = req.user; // From auth middleware
+    const chats = await ChatService.findByUserAndOrganization(
+      userId,
+      organizationId
+    );
+    res.json({ chats });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+}
+
+async function getChatById(req, res) {
+  try {
+    const { id: userId, organizationId } = req.user; // From auth middleware
+    const { chatId } = req.params;
+    const chat = await ChatService.findByIdAndUser(
+      chatId,
+      userId,
+      organizationId
+    );
+    if (!chat) {
+      return res.status(404).json({ error: "Chat not found" });
+    }
+    const messages = await MessageService.findByChat(chat._id);
+    res.json({ chat, messages });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+}
+
+async function getOrganizationDocuments(req, res) {
+  try {
+    const { id: userId, organizationId } = req.user; // From auth middleware
+    const documents = await DocumentService.findByOrganizationAndUser(
+      userId,
+      organizationId
+    );
+    res.json({ documents });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+}
+
+async function deleteOrganizationDocument(req, res) {
+  try {
+    const { id: userId, organizationId } = req.user; // From auth middleware
+    const { docId } = req.params;
+    const document = await DocumentService.findByIdAndOrganization(
+      docId,
+      organizationId
+    );
+    if (!document) {
+      return res.status(404).json({ error: "Document not found" });
+    }
+
+    // Delete embeddings from ChromaDB
+    const collection = await getOrCreateCollection(
+      `org_${organizationId}_docs`
+    );
+    await collection.delete({ ids: document.chromaIds });
+
+    // Delete document metadata from MongoDB
+    await DocumentService.delete(docId);
+    res.json({ message: "Document deleted successfully" });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+}
+
+module.exports = {
+  chatWithAIStream,
+  uploadFile,
+  getUserChats,
+  getChatById,
+  getOrganizationDocuments,
+  deleteOrganizationDocument,
+};
