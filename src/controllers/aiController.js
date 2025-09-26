@@ -119,143 +119,114 @@ async function processPDFStreaming(buffer) {
   }
 }
 
+async function createChat(req, res) {
+  const { title } = req.body;
+  const { id: userId, organizationId } = req.user;
+  const chat = await ChatService.create({
+    userId,
+    organizationId,
+    title: title || "New chat",
+  });
+  res.json({ chat });
+}
+
 async function chatWithAIStream(req, res) {
   let messagesSaved = false;
 
   try {
-    const { prompt } = req.body;
+    const { prompt, chatId: requestedChatId, createNewChat } = req.body;
     const userId = req.user._id;
     const organizationId = req.user.organizationId._id;
-
-    console.log("🔍 DEBUG - chatWithAIStream started:", {
-      promptLength: prompt?.length,
-      userId,
-      organizationId,
-    });
 
     if (!prompt || typeof prompt !== "string") {
       return res.status(400).json({ error: "prompt required" });
     }
 
-    if (!organizationId || !userId) {
-      return res.status(401).json({ error: "Authentication required" });
+    // 1) Try to find chat from provided chatId
+    let chat = null;
+    if (requestedChatId && requestedChatId !== "new") {
+      chat = await ChatService.findByIdAndUser(
+        requestedChatId,
+        userId,
+        organizationId
+      );
     }
 
-    // Create or fetch chat
-    let chat = await ChatService.findByUserAndOrganization(
-      userId,
-      organizationId
-    );
-    console.log("🔍 DEBUG - Chat found:", chat?.length);
-
-    if (!chat || !chat.length) {
+    // 2) If createNewChat is explicitly true or no chat found, create a new one
+    if (!chat || createNewChat) {
       chat = await ChatService.create({
         userId,
         organizationId,
         title: prompt.slice(0, 50),
       });
-      console.log("🔍 DEBUG - New chat created:", chat._id);
-    } else {
-      chat = chat[0];
-      console.log("🔍 DEBUG - Existing chat used:", chat._id);
+      console.log("New chat created:", chat._id);
     }
 
-    // Fetch organization documents
-    const docs = await DocumentService.findByOrganizationAndUser(
-      userId,
-      organizationId
-    );
-    const docContext = docs.map((doc) => doc.filename).join("\n");
-    console.log("🔍 DEBUG - Documents found:", docs.length);
-
-    // Fetch user chat history
-    const messages = await MessageService.findByChat(chat._id);
-    const chatHistory = messages
-      .map((msg) => `${msg.role}: ${msg.content}`)
-      .join("\n");
-    console.log("🔍 DEBUG - Messages found:", messages.length);
-
-    // Combine context
-    const fullPrompt = `${docContext}\n\n${chatHistory}\n\nUser: ${prompt}`;
-    console.log("🔍 DEBUG - Full prompt length:", fullPrompt.length);
-
-    // Stream AI response
+    // 4) Set SSE headers
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
+    res.flushHeaders();
 
+    // 5) Tell client which chatId we’re using
+    res.write(`data: ${JSON.stringify({ chatId: chat._id })}\n\n`);
+
+    // optional: build full context prompt here
+    const fullPrompt = prompt;
+
+    // Grab abort signal if available
     const abortSignal =
       req.signal && typeof req.signal.addEventListener === "function"
         ? req.signal
         : null;
 
-    console.log("🔍 DEBUG - Calling streamAIResponse");
-
+    // 6) Call your AI service with streaming
     await streamAIResponse(
       fullPrompt,
       (token) => {
-        console.log("🔍 DEBUG - Streaming token:", token.length);
+        // Stream tokens back
         res.write(`data: ${JSON.stringify({ token })}\n\n`);
       },
       async (fullResponse) => {
-        if (messagesSaved) {
-          console.log("🔍 DEBUG - Messages already saved, skipping");
-          return;
-        }
-
-        console.log(
-          "🔍 DEBUG - Stream completed, full response length:",
-          fullResponse?.length || 0
-        );
+        if (messagesSaved) return;
+        messagesSaved = true;
 
         try {
-          messagesSaved = true; // ✅ Set flag before creating messages
-
-          // Save user message
+          // Save user’s message
           const userMsg = await MessageService.create({
             chatId: chat._id,
             role: "user",
             content: prompt,
           });
-          await chatService.addMessage(chat._id, userMsg._id);
-          console.log("🔍 DEBUG - User message saved:", userMsg._id);
+          await ChatService.addMessage(chat._id, userMsg._id);
 
-          // Only save AI message if we have a response
+          // Save assistant’s reply
           if (fullResponse && fullResponse.trim().length > 0) {
-            const aiMessage = await MessageService.create({
+            const aiMsg = await MessageService.create({
               chatId: chat._id,
               role: "assistant",
               content: fullResponse,
             });
-            await chatService.addMessage(chat._id, aiMessage._id);
-            console.log("🔍 DEBUG - AI message saved:", aiMessage._id);
-          } else {
-            console.log("🔍 DEBUG - Empty AI response, not saving");
+            await ChatService.addMessage(chat._id, aiMsg._id);
           }
-        } catch (msgError) {
-          console.error("🔍 DEBUG - Message save error:", msgError);
-          // Don't throw here to avoid breaking the stream
+        } catch (err) {
+          console.error("Failed to save messages:", err);
         }
 
+        // Signal completion to client
         res.write(`data: [DONE]\n\n`);
         res.end();
-        console.log("🔍 DEBUG - Response stream ended");
       },
       abortSignal
     );
   } catch (err) {
-    console.log("🔍 DEBUG - chatWithAIStream ERROR:", err);
-    console.error("chatWithAIStream error:", err.message || err);
-
+    console.error(" chatWithAIStream ERROR:", err);
     if (!res.headersSent) {
       res.write(
         `data: ${JSON.stringify({ error: "Internal server error" })}\n\n`
       );
     }
-
-    if (!res.writableEnded) {
-      res.end();
-    }
+    if (!res.writableEnded) res.end();
   }
 }
 
@@ -418,12 +389,14 @@ async function uploadFile(req, res) {
 
 async function getUserChats(req, res) {
   try {
-    const { id: userId, organizationId } = req.user; // From auth middleware
+    const { id: userId } = req.user; // From auth middleware
+    const organizationId = req.user.organizationId;
     const chats = await ChatService.findByUserAndOrganization(
       userId,
       organizationId
     );
-    res.json({ chats });
+    console.log(chats);
+    res.status(200).json(chats);
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

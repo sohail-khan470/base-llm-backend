@@ -15,6 +15,11 @@ class ChatService {
 
     return await query;
   }
+  // in chat-service.js
+  async findByIdAndUser(chatId, userId, organizationId) {
+    console.log("running");
+    return Chat.findOne({ _id: chatId, userId, organizationId });
+  }
 
   async findByUser(userId) {
     return await Chat.find({ userId })
@@ -91,15 +96,16 @@ class ChatService {
 
   async findByUserAndOrganization(userId, organizationId) {
     try {
-      return await Chat.findOne({
+      return await Chat.find({
         userId,
         organizationId,
       })
         .populate("userId")
         .populate("organizationId")
-        .populate("messages");
+        .populate("messages")
+        .sort({ updatedAt: -1 }); // optional: newest first
     } catch (err) {
-      throw new Error("Error fetching chat: " + err.message);
+      throw new Error("Error fetching chats: " + err.message);
     }
   }
 
