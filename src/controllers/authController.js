@@ -125,6 +125,7 @@ const register = async (req, res) => {
 
     // Check if organization exists
     const existingOrg = await organizationService.findById(organizationId);
+
     if (!existingOrg) {
       return res.status(404).json({ error: "Organization not found" });
     }
@@ -140,15 +141,11 @@ const register = async (req, res) => {
     // Hash password and create user
     const passwordHash = await bcrypt.hash(password, 12);
 
-    console.log("ERRRRRRRRR", passwordHash);
-
     const user = await userService.create({
       email,
       passwordHash,
       organizationId,
     });
-
-    console.log(user);
 
     // Populate organization details
     await user.populate("organizationId");
@@ -174,8 +171,36 @@ const register = async (req, res) => {
   }
 };
 
+const me = async (req, res) => {
+  try {
+    // The user is already attached to req by authenticateToken middleware
+    const user = req.user;
+
+    res.json({
+      message: "User data retrieved successfully",
+      user: {
+        id: user._id,
+        email: user.email,
+        role: user.role,
+        organization: {
+          id: user.organizationId._id,
+          name: user.organizationId.name,
+          email: user.organizationId.email,
+        },
+      },
+    });
+  } catch (error) {
+    console.error("Get user data error:", error);
+    res.status(500).json({
+      error: "Failed to get user data",
+      details: error.message,
+    });
+  }
+};
+
 module.exports = {
   register,
   login,
   addUser,
+  me,
 };

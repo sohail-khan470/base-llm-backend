@@ -18,7 +18,7 @@ router.post("/chat", authenticateToken, requireOrganization, chatWithAIStream);
 router.post("/upload", authenticateToken, requireOrganization, uploadFile);
 router.get("/chats", authenticateToken, requireOrganization, getUserChats);
 router.get(
-  "/chats/:chatId",
+  "/chat/:chatId",
   authenticateToken,
   requireOrganization,
   getChatById

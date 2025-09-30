@@ -2,6 +2,8 @@ const ChatService = require("../services/chat-service");
 const MessageService = require("../services/message-service");
 const DocumentService = require("../services/document-service");
 const { streamAIResponse, generateQA } = require("../services/aiService");
+const mongoose = require("mongoose");
+const { ObjectId } = mongoose.Types;
 const {
   generateEmbedding,
   storeOrgDocumentContext,
@@ -159,7 +161,6 @@ async function chatWithAIStream(req, res) {
         organizationId,
         title: prompt.slice(0, 50),
       });
-      console.log("New chat created:", chat._id);
     }
 
     // 4) Set SSE headers
@@ -390,12 +391,13 @@ async function uploadFile(req, res) {
 async function getUserChats(req, res) {
   try {
     const { id: userId } = req.user; // From auth middleware
-    const organizationId = req.user.organizationId;
+    const organizationId = req.user.organizationId._id;
+    console.log(userId, organizationId);
     const chats = await ChatService.findByUserAndOrganization(
       userId,
       organizationId
     );
-    console.log(chats);
+
     res.status(200).json(chats);
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -404,19 +406,55 @@ async function getUserChats(req, res) {
 
 async function getChatById(req, res) {
   try {
-    const { id: userId, organizationId } = req.user; // From auth middleware
+    const userId = req.user._id;
+    const organizationId = req.user.organizationId._id;
     const { chatId } = req.params;
-    const chat = await ChatService.findByIdAndUser(
+
+    console.log("getChatById called with:", {
       chatId,
       userId,
-      organizationId
+      organizationId: organizationId?.toString(),
+    });
+
+    // First find the chat by ID
+    let chat;
+    try {
+      chat = await ChatService.findById(new ObjectId(chatId), true);
+    } catch (idErr) {
+      console.log("Invalid ObjectId:", chatId);
+      return res.status(400).json({ error: "Invalid chat ID" });
+    }
+
+    console.log(
+      "Chat found:",
+      chat?._id,
+      "org:",
+      chat?.organizationId?._id?.toString()
     );
+
     if (!chat) {
+      console.log("Chat not found for ID:", chatId);
       return res.status(404).json({ error: "Chat not found" });
     }
+
+    // Check if the chat belongs to the user's organization
+    const chatOrgId = chat.organizationId._id.toString();
+    console.log("Comparing org IDs:", {
+      chatOrgId,
+      userOrgId: organizationId?.toString(),
+    });
+
+    if (chatOrgId !== organizationId.toString()) {
+      console.log("Organization mismatch - access denied");
+      return res.status(404).json({ error: "Chat not found" });
+    }
+
     const messages = await MessageService.findByChat(chat._id);
+    console.log("Returning chat with", messages.length, "messages");
+
     res.json({ chat, messages });
   } catch (err) {
+    console.error("Error in getChatById:", err);
     res.status(400).json({ error: err.message });
   }
 }

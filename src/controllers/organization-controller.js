@@ -1,4 +1,5 @@
 const organizationService = require("../services/organization-service");
+const chatService = require("../services/chat-service");
 
 class OrganizationController {
   async create(req, res) {
@@ -55,6 +56,23 @@ class OrganizationController {
       res.json({ message: "Organization deleted successfully" });
     } catch (err) {
       res.status(500).json({ error: err.message });
+    }
+  }
+
+  async getChatsByOrg(req, res) {
+    try {
+      const organizationId = req.params.id;
+
+      const organization = await organizationService.findById(organizationId);
+      if (!organization) {
+        return res.status(404).json({ error: "Organization not found" });
+      }
+
+      const chats = await chatService.findByOrganization(organizationId);
+
+      return res.status(200).json(chats);
+    } catch (error) {
+      res.status(500).json({ error: error.message });
     }
   }
 }

@@ -39,11 +39,10 @@ const authenticateToken = async (req, res, next) => {
 // Organization isolation middleware - ensure users can only access their org data
 const requireOrganization = async (req, res, next) => {
   const organizationId = req.user.organizationId._id;
-  console.log();
+
   try {
     // Check if organizationId is provided in request (for admin routes)
     const requestedOrgId = organizationId;
-    console.log(requestedOrgId);
 
     // if (requestedOrgId && requestedOrgId !== req.organizationId.toString()) {
     //   return res.status(403).json({

@@ -1,9 +1,19 @@
 const Chat = require("../models/Chat");
+const mongoose = require("mongoose");
+const { ObjectId } = mongoose.Types;
 
 class ChatService {
   async create(chatData) {
     const chat = new Chat(chatData);
     return await chat.save();
+  }
+
+  async findAll(organizationId) {
+    const chats = await Chat.find({ _id: organizationId }).populate(
+      "organizationId"
+    );
+
+    return chats;
   }
 
   async findById(id, populateMessages = false) {
@@ -17,7 +27,7 @@ class ChatService {
   }
   // in chat-service.js
   async findByIdAndUser(chatId, userId, organizationId) {
-    console.log("running");
+    console.log("**********");
     return Chat.findOne({ _id: chatId, userId, organizationId });
   }
 
@@ -110,15 +120,22 @@ class ChatService {
   }
 
   async findByIdAndUser(chatId, userId, organizationId) {
-    return await Chat.findOne({
-      _id: chatId,
-      userId,
-      organizationId,
-    })
-      .populate("organizationId")
-      .populate("userId")
-      .populate("messages")
-      .exec();
+    try {
+      console.log(chatId, userId, organizationId);
+      const chat = await Chat.findOne({
+        _id: chatId,
+        userId,
+        organizationId,
+      })
+        .populate("organizationId")
+        .populate("userId")
+        .populate("messages")
+        .exec();
+      console.log(chat);
+      return chat;
+    } catch (error) {
+      console.log(error);
+    }
   }
 }
 

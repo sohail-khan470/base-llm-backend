@@ -34,6 +34,10 @@ class OrganizationService {
     const organization = await Organization.findOne({ email });
     return !!organization;
   }
+
+  async findChatsByOrg(organizationId) {
+    return await Organization.findById(organizationId).populate("chats");
+  }
 }
 
 module.exports = new OrganizationService();

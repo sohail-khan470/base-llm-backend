@@ -3,6 +3,7 @@ const { aiRoutes, authRoutes } = require("./src/routes");
 const cors = require("cors");
 const fileUpload = require("express-fileupload");
 const organizationRoutes = require("./src/routes/organizationRoutes");
+const chatRoutes = require("./src/routes/chatRoutes");
 const { connectDB } = require("./src/config/db");
 
 const app = express();
@@ -20,10 +21,11 @@ app.use(fileUpload()); // Enable file uploads
 // db connection
 connectDB();
 
-app.use("/auth", authRoutes);
+app.use("/api/auth", authRoutes);
 
 app.use("/api/ai", aiRoutes);
-app.use("/api/organizations", organizationRoutes);
+app.use("/api/ai/organizations", organizationRoutes);
+app.use("/api/ai/chats", chatRoutes);
 
 const PORT = process.env.PORT || 3008;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));

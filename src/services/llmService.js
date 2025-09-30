@@ -219,7 +219,6 @@ async function streamAIResponse(
         }
       });
     } catch (err) {
-      console.log(err);
       console.error("Ollama generate error:", err.message || err);
       onDone("");
       throw err;

@@ -17,4 +17,7 @@ router.put("/:id", organizationController.update);
 // Delete organization
 router.delete("/:id", organizationController.delete);
 
+//getAllChatsByOrg  /api/ai/organizations
+router.get("/:id/chats", organizationController.getChatsByOrg);
+
 module.exports = router;
