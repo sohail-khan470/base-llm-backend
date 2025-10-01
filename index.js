@@ -1,7 +1,6 @@
 const express = require("express");
 const { aiRoutes, authRoutes } = require("./src/routes");
 const cors = require("cors");
-const fileUpload = require("express-fileupload");
 const organizationRoutes = require("./src/routes/organizationRoutes");
 const chatRoutes = require("./src/routes/chatRoutes");
 const { connectDB } = require("./src/config/db");
@@ -14,10 +13,6 @@ app.use(
   })
 );
 app.use(express.json());
-app.use(fileUpload()); // Enable file uploads
-
-// Routes
-
 // db connection
 connectDB();
 

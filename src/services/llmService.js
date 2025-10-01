@@ -297,8 +297,42 @@ async function storeUserMessage(
 
 // Helper function to query combined context
 async function queryCombinedContext(prompt, organizationId, userId, limit) {
-  // Implement your context querying logic here
-  return []; // Return array of context items
+  try {
+    console.log(
+      "Querying context for prompt:",
+      prompt.substring(0, 100) + "..."
+    );
+    console.log("Organization ID:", organizationId, "User ID:", userId);
+
+    const contextItems = await queryContext(
+      prompt,
+      limit,
+      organizationId,
+      userId
+    );
+    console.log("Retrieved context items:", contextItems.length);
+
+    // Add source information to each item
+    const enrichedItems = contextItems.map((item) => ({
+      ...item,
+      source:
+        item.metadata?.type === "document" ? "knowledge_base" : "chat_history",
+    }));
+
+    console.log(
+      "Enriched context items:",
+      enrichedItems.map((item) => ({
+        source: item.source,
+        distance: item.distance,
+        preview: item.document?.substring(0, 50) + "...",
+      }))
+    );
+
+    return enrichedItems;
+  } catch (error) {
+    console.error("Error querying combined context:", error.message);
+    return [];
+  }
 }
 
 module.exports = { streamAIResponse, generateQA };
