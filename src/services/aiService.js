@@ -1,6 +1,7 @@
 const axios = require("axios");
+const { DEFAULT_MODEL_LOCAL } = require("../config/server-config");
 
-const DEFAULT_MODEL = "phi3:latest";
+const DEFAULT_MODEL = DEFAULT_MODEL_LOCAL;
 const MAX_TOKENS = 2000;
 
 const streamAIResponse = (

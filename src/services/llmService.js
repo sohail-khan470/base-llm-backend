@@ -17,7 +17,13 @@ const DEFAULT_MODEL_LOCAL =
 const DEFAULT_OPENAI_MODEL =
   process.env.DEFAULT_OPENAI_MODEL || "gpt-3.5-turbo";
 const MAX_TOKENS = 2000;
-const DEFAULT_SYSTEM_PROMPT = `You are an intelligent assistant. Use the provided context to answer concisely and accurately.`;
+
+// Improved system prompt that handles both context and general knowledge
+const DEFAULT_SYSTEM_PROMPT = `You are an intelligent assistant. Follow these guidelines:
+1. Use the provided context to answer questions when relevant information is available
+2. If the context doesn't contain the answer, use your general knowledge to provide a helpful response
+3. Never say "this does not exist in the context" or similar phrases
+4. Always provide the most accurate answer you can, whether from context or general knowledge`;
 
 /**
  * Streams an LLM response and calls onData(token) for each chunk, then onDone(fullResponse).
@@ -38,7 +44,6 @@ async function streamAIResponse(
 
   // React to external abort (client disconnect)
   if (reqAbortSignal) {
-    // Use a simple flag-based approach instead of signal linking
     reqAbortSignal.addEventListener("abort", () => {
       console.log("Request aborted by client");
       isStreamActive = false;
@@ -46,7 +51,7 @@ async function streamAIResponse(
     });
   }
 
-  // Build context (RAG)
+  // Build context (RAG) - Get all context without filtering
   const contextItems = await queryCombinedContext(
     prompt,
     organizationId,
@@ -54,13 +59,17 @@ async function streamAIResponse(
     5
   );
 
+  console.log(`Retrieved ${contextItems.length} context items`);
+
+  // Prepare the context text - use ALL context items without filtering
   const contextText = contextItems
-    .map((i, idx) => `[${i.source}] Context ${idx + 1}: ${i.document}`)
+    .map((i, idx) => `[Source: ${i.source}] ${i.document}`)
     .join("\n\n");
 
+  // Always include context in the prompt, but with clear instructions
   const userContent = contextText
-    ? `${contextText}\n\nUser: ${prompt}`
-    : `User: ${prompt}`;
+    ? `Context information:\n${contextText}\n\nUser Question: ${prompt}`
+    : `User Question: ${prompt}`;
 
   if (OPENAI_API_KEY) {
     // Use OpenAI streaming chat completions
@@ -126,12 +135,14 @@ async function streamAIResponse(
             await storeUserMessage(userId, uuidv4(), prompt, promptEmb, {
               type: "prompt",
               organizationId: organizationId,
+              contextItemsCount: contextItems.length,
             });
           }
           if (respEmb) {
             await storeUserMessage(userId, uuidv4(), fullResponse, respEmb, {
               type: "response",
               organizationId: organizationId,
+              contextItemsCount: contextItems.length,
             });
           }
         } catch (err) {
@@ -152,20 +163,21 @@ async function streamAIResponse(
       throw err;
     }
   } else {
-    // Ollama local streaming - Remove signal from Ollama request
+    // Ollama local streaming
     try {
+      const fullPrompt = `${DEFAULT_SYSTEM_PROMPT}\n\n${userContent}`;
+
       const response = await axios.post(
         OLLAMA_GENERATE_ENDPOINT,
         {
           model: DEFAULT_MODEL_LOCAL,
-          prompt: `${DEFAULT_SYSTEM_PROMPT}\n\n${userContent}`,
+          prompt: fullPrompt,
           stream: true,
           options: { num_predict: MAX_TOKENS },
         },
         {
           responseType: "stream",
           timeout: 120000,
-          // Remove signal from Ollama config to avoid the error
         }
       );
 
@@ -194,6 +206,7 @@ async function streamAIResponse(
         if (!isStreamActive) return;
         isStreamActive = false;
         onDone(fullResponse);
+
         // Store prompt and response in user-specific chat collection
         try {
           const promptEmb = await generateEmbedding(prompt);
@@ -239,7 +252,11 @@ async function generateQA(contextText) {
         {
           model: DEFAULT_OPENAI_MODEL,
           messages: [
-            { role: "system", content: DEFAULT_SYSTEM_PROMPT },
+            {
+              role: "system",
+              content:
+                "You are a helpful assistant that creates Q&A pairs from given context.",
+            },
             { role: "user", content: prompt },
           ],
           max_tokens: 300,
@@ -290,7 +307,7 @@ async function storeUserMessage(
   console.log("Storing user message:", {
     userId,
     messageId,
-    content,
+    content: content.substring(0, 100) + "...",
     metadata,
   });
 }
@@ -312,21 +329,23 @@ async function queryCombinedContext(prompt, organizationId, userId, limit) {
     );
     console.log("Retrieved context items:", contextItems.length);
 
+    // Debug logging
+    if (contextItems.length > 0) {
+      console.log("First context item preview:", {
+        distance: contextItems[0].distance,
+        document: contextItems[0].document
+          ? contextItems[0].document.substring(0, 150) + "..."
+          : "No document",
+        metadata: contextItems[0].metadata,
+      });
+    }
+
     // Add source information to each item
     const enrichedItems = contextItems.map((item) => ({
       ...item,
       source:
         item.metadata?.type === "document" ? "knowledge_base" : "chat_history",
     }));
-
-    console.log(
-      "Enriched context items:",
-      enrichedItems.map((item) => ({
-        source: item.source,
-        distance: item.distance,
-        preview: item.document?.substring(0, 50) + "...",
-      }))
-    );
 
     return enrichedItems;
   } catch (error) {

@@ -21,7 +21,7 @@ const DocumentSchema = new Schema(
     },
     docType: {
       type: String,
-      enum: ["pdf", "txt", "md"],
+      enum: ["pdf", "txt", "md", "csv", "excel", "docx"],
       required: [true, "Document type is required"],
     },
     status: {
