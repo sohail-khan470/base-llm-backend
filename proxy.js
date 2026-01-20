@@ -2,19 +2,15 @@
 const express = require("express");
 const cors = require("cors");
 const { createProxyMiddleware } = require("http-proxy-middleware");
+const { PORT } = require("./src/config/server-config");
 const morgan = require("morgan");
 
 const app = express();
 
-// Enhanced CORS for Tailscale
+// CORS configuration
 app.use(
   cors({
-    origin: [
-      "https://desktop-vbrb5c9.tail0d77c7.ts.net:3008",
-      "https://desktop-vbrb5c9.tail0d77c7.ts.net",
-      "http://localhost:3008",
-      "http://localhost:5173",
-    ],
+    origin: ["http://localhost:3008", "http://localhost:5173"],
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   })
@@ -26,7 +22,7 @@ app.use(morgan("combined"));
 app.use(
   "/",
   createProxyMiddleware({
-    target: "http://localhost:3009",
+    target: `http://localhost:${PORT}`,
     changeOrigin: true,
     onProxyReq: (proxyReq, req, res) => {
       console.log(
@@ -40,8 +36,8 @@ app.use(
   })
 );
 
-const PORT = 3008;
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Proxy server running on http://localhost:${PORT}`);
-  console.log(`All routes are being proxied to backend on port 3009`);
+const PROXY_PORT = 3007; // Run proxy on 3007, proxy to backend on PORT (3008)
+app.listen(PROXY_PORT, "0.0.0.0", () => {
+  console.log(`Proxy server running on http://localhost:${PROXY_PORT}`);
+  console.log(`All routes are being proxied to backend on port ${PORT}`);
 });

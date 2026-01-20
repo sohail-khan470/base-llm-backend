@@ -16,7 +16,10 @@ class OrganizationService {
   }
 
   async findAll() {
-    return await Organization.find();
+    console.log("Finding all organizations...");
+    const organizations = await Organization.find();
+    console.log("Found organizations:", organizations.length);
+    return organizations;
   }
 
   async update(id, updateData) {

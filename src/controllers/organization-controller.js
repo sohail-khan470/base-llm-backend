@@ -26,6 +26,7 @@ class OrganizationController {
   async findAll(req, res) {
     try {
       const organizations = await organizationService.findAll();
+      console.log(organizations, "OOOOOOOOOOOO");
       res.json(organizations);
     } catch (err) {
       res.status(500).json({ error: err.message });
